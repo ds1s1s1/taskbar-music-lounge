@@ -3,16 +3,18 @@
 // @name            Taskbar Music Lounge
 // @description     Now-playing widget for the taskbar with media controls, a progress bar and Discord Rich Presence
 // @version         0.2
-// @author          ds1s1s1
+// @author          Hashah2311, ds1s1s1
 // @github          https://github.com/ds1s1s1
 // @include         explorer.exe
 // @compilerOptions -lole32 -ldwmapi -lgdi32 -luser32 -lwindowsapp -lshcore -lgdiplus -lshell32 -lcomdlg32
-// @license         MIT
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
 /*
 # Taskbar Music Lounge
+
+Based on Taskbar Music Lounge by Hashah2311 (<https://github.com/Hashah2311>),
+with Discord Rich Presence, a progress bar and per-player colors added.
 
 A now-playing widget that sits on the taskbar. It reads from the Windows media
 controls (SMTC), so it works with most players: Spotify, MusicBee, foobar2000,

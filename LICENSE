@@ -1,3 +1,16 @@
+This project is based on "Taskbar Music Lounge" by Hashah2311
+(https://github.com/Hashah2311), published in the Windhawk mods repository:
+https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-music-lounge.wh.cpp
+
+The original code is copyright (c) Hashah2311. It isn't published under an
+open-source license, so those parts are not covered by the license below.
+
+The changes made in this repository (Discord Rich Presence, the progress bar,
+per-player accent colors, the preferred player setting and the settings
+descriptions) are released under the MIT License:
+
+---
+
 MIT License
 
 Copyright (c) 2026 ds1s1s1

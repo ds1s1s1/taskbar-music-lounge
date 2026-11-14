@@ -1,37 +1,46 @@
 <h1 align="center">Taskbar Music Lounge</h1>
 
 <p align="center">
-  <b>Your music, right on the taskbar.</b><br>
-  A Windhawk mod that adds a now-playing widget to the Windows 11 taskbar, with album art, playback controls, a progress bar and your current song on Discord. Works with Spotify, MusicBee, YouTube and anything else that uses the Windows media controls.
+  <b>Your music on the taskbar, now with Discord status.</b><br>
+  A modified version of Hashah2311's <a href="https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-music-lounge.wh.cpp">Taskbar Music Lounge</a> Windhawk mod. It adds Discord Rich Presence, a progress bar and per-player colors to his now-playing widget for the Windows 11 taskbar.
 </p>
 
 <p align="center">
   <a href="#installation">Install</a> ·
   <a href="https://github.com/ds1s1s1/taskbar-music-lounge/releases/latest">Download</a> ·
-  <a href="#features">Features</a> ·
+  <a href="#whats-new-in-this-version">What's new</a> ·
   <a href="#settings">Settings</a> ·
   <a href="#discord-status">Discord status</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
-  <a href="#how-it-works">How it works</a>
+  <a href="#credits">Credits</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/ds1s1s1/taskbar-music-lounge/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/ds1s1s1/taskbar-music-lounge?label=release&color=orange"></a>
   <a href="https://github.com/ds1s1s1/taskbar-music-lounge/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/ds1s1s1/taskbar-music-lounge/total?label=downloads&color=brightgreen"></a>
-  <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/ds1s1s1/taskbar-music-lounge?color=green"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2011-0078D4">
   <a href="https://windhawk.net/"><img alt="Windhawk mod" src="https://img.shields.io/badge/Windhawk-mod-1f6feb"></a>
+  <a href="https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-music-lounge.wh.cpp"><img alt="based on Hashah2311/taskbar-music-lounge" src="https://img.shields.io/badge/based%20on-Hashah2311%2Ftaskbar--music--lounge-8b5cf6"></a>
 </p>
 
-## Features
+> [!NOTE]
+> The widget itself is [Hashah2311](https://github.com/Hashah2311)'s work. If you only want the widget, install the original **Taskbar Music Lounge** straight from Windhawk. This repo is for people who want the extra features below.
 
-- **Now playing on the taskbar**: album art, title and artist, with previous / play-pause / next buttons
-- **Progress bar** for the current track, and long titles scroll instead of getting cut off
+## What's new in this version
+
+- **Discord status**: shows the song you're listening to on your Discord profile, no extra app needed
+- **Progress bar** for the current track
 - **Colors that match the player**: Spotify green, MusicBee amber, Apple Music red and so on
-- **Volume on scroll**: scroll over the widget to turn the volume up or down
-- **Fits in**: acrylic background that follows light/dark mode, or your own text color and opacity
-- **Stays out of the way**: hides in fullscreen apps and games, and when nothing has been playing for a while
-- **Discord status**: shows the song you're listening to on your profile, no extra app needed
+- **Preferred player** setting for when more than one app is playing
+- Every setting has a proper name and description in Windhawk
+
+## Already in the version this is based on
+
+- Album art, title and artist, with previous / play-pause / next buttons
+- Works with any player that shows up in the Windows media flyout
+- Scroll over the widget to change the volume
+- Acrylic background that follows light/dark mode, or your own text color and opacity
+- Hides in fullscreen apps and games, and when nothing has been playing for a while
 
 ## Supported players
 
@@ -56,6 +65,8 @@ Anything that shows up in the Windows media flyout works. These get their own ac
 1. Install [Windhawk](https://windhawk.net/).
 2. Click **Create a new mod** and replace the template with the contents of [`taskbar-music-lounge.wh.cpp`](taskbar-music-lounge.wh.cpp) (it's also attached to every [release](https://github.com/ds1s1s1/taskbar-music-lounge/releases/latest)).
 3. Compile it and exit the editor. Play something and the widget shows up on the taskbar.
+
+If you also have the original Taskbar Music Lounge installed, disable it so you don't get two widgets.
 
 ## Settings
 
@@ -121,6 +132,11 @@ flowchart LR
 
 The mod runs in its own small helper process next to `explorer.exe`. It reads the current media session from SMTC, draws the widget with GDI+ in a window that sits on the taskbar, and if Discord status is on, sends the song to the Discord app over its local IPC pipe.
 
+## Credits
+
+- [Hashah2311](https://github.com/Hashah2311) made the original [Taskbar Music Lounge](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-music-lounge.wh.cpp), which this is based on.
+- Discord status, the progress bar, per-player colors and the preferred player setting were added by [ds1s1s1](https://github.com/ds1s1s1).
+
 ## License
 
-[MIT](LICENSE)
+The original Taskbar Music Lounge code belongs to Hashah2311 and doesn't come with an open-source license. The changes made in this repo are MIT licensed. See [LICENSE](LICENSE) for details.
