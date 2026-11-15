@@ -2,7 +2,7 @@
 // @id              taskbar-music-lounge
 // @name            Taskbar Music Lounge
 // @description     Now-playing widget for the taskbar with media controls, a progress bar and Discord Rich Presence with cover art
-// @version         0.3
+// @version         0.3.1
 // @author          Hashah2311, ds1s1s1
 // @github          https://github.com/ds1s1s1
 // @include         explorer.exe
@@ -24,6 +24,8 @@ Apple Music, and media playing in Chrome, Edge or Firefox.
 - Album art, title and artist, with previous / play-pause / next buttons
 - The picture changes as soon as the player's does, and video thumbnails are
   cropped to a square instead of squashed
+- On sites that don't provide a picture, the previous video's picture isn't
+  shown instead
 - Long titles scroll instead of getting cut off
 - Progress bar for the current track
 - Accent color based on the player (Spotify, MusicBee, Apple Music, ...)
@@ -1115,26 +1117,39 @@ static long long NowUnixMs() {
 }
 
 // Album art state, only used on the media window's thread
-uint64_t g_ArtHash = 0;          // hash of the thumbnail on screen, 0 = none
-wstring g_ArtTrackKey;           // player + title + artist it belongs to
-ULONGLONG g_ArtTrackSince = 0;   // when that track showed up
-uint64_t g_ArtHashBefore = 0;    // picture on screen at that moment
-bool g_ArtSettled = true;        // false while the track's own picture may still be coming
+uint64_t g_ArtHash = 0;            // hash of the thumbnail the player reports, 0 = none
+shared_ptr<Bitmap> g_ArtBitmap;    // that thumbnail, decoded
+Color g_ArtTint = Color(0, 0, 0);
+ULONGLONG g_ArtChangedAt = 0;      // when the player last changed it
+wstring g_ArtOwner;                // the track that was playing when it showed up
+wstring g_ArtOwnerAlbum;           // that track's album ("" if it has none)
+wstring g_ArtTrackKey;             // the track playing now (player + title + artist)
+ULONGLONG g_ArtTrackSince = 0;     // when it started
+bool g_ArtIsOwn = false;           // the reported picture belongs to the track playing now
+bool g_ArtSettled = true;          // false while the track's own picture may still be coming
 ULONGLONG g_ArtNextCheck = 0;
-uint64_t g_CoverHashSent = 0;    // picture last handed to the Discord thread
+uint64_t g_CoverHashSent = 0;      // picture last handed to the Discord thread
 
-// Players often publish the title first and the picture a moment later, and
-// some keep the previous track's picture for a while. So the thumbnail is
-// checked on every poll for a few seconds after a track change, and every few
-// seconds after that, and swapped whenever its bytes change.
+// Players often publish the title first and the picture a moment later, so
+// the thumbnail is checked on every poll for a few seconds after a track
+// change, and every few seconds after that.
+//
+// Some players also keep reporting the previous picture when the new track
+// has none (Firefox does this on sites without artwork). So a picture only
+// counts for the track that was playing when it showed up, or for tracks of
+// the same album. Anything else is hidden once the new track has had a few
+// seconds to bring its own.
 static void RefreshAlbumArt(GlobalSystemMediaTransportControlsSessionMediaProperties const& props,
-                            const wstring& trackKey) {
+                            const wstring& trackKey, const wstring& albumKey) {
     ULONGLONG now = GetTickCount64();
     if (trackKey != g_ArtTrackKey) {
+        // A picture that changed right before the title is the new track's
+        if (g_ArtHash && now - g_ArtChangedAt < 1500) {
+            g_ArtOwner = trackKey;
+            g_ArtOwnerAlbum = albumKey;
+        }
         g_ArtTrackKey = trackKey;
         g_ArtTrackSince = now;
-        g_ArtHashBefore = g_ArtHash;
-        g_ArtSettled = false;
     }
 
     if (now - g_ArtTrackSince < 8000 || now >= g_ArtNextCheck) {
@@ -1143,24 +1158,33 @@ static void RefreshAlbumArt(GlobalSystemMediaTransportControlsSessionMediaProper
         uint64_t hash = ReadThumbnail(props, bytes) ? HashBytes(bytes) : 0;
         if (hash != g_ArtHash) {
             g_ArtHash = hash;
-            shared_ptr<Bitmap> art(hash ? DecodeArt(bytes) : nullptr);
-            Color tint = art ? CalculateAverageColor(art.get()) : Color(0, 0, 0);
-            lock_guard<mutex> guard(g_MediaState.lock);
-            g_MediaState.albumArt = art;
-            g_MediaState.primaryColor = tint;
+            g_ArtChangedAt = now;
+            g_ArtOwner = trackKey;
+            g_ArtOwnerAlbum = albumKey;
+            g_ArtBitmap.reset(hash ? DecodeArt(bytes) : nullptr);
+            g_ArtTint = g_ArtBitmap ? CalculateAverageColor(g_ArtBitmap.get()) : Color(0, 0, 0);
         }
     }
 
-    // The new track's picture is in once it differs from the old one. If it
-    // hasn't changed after a few seconds, both tracks share it (same album).
-    if (!g_ArtSettled) {
-        g_ArtSettled = (g_ArtHash && g_ArtHash != g_ArtHashBefore) || now - g_ArtTrackSince >= 3000;
+    g_ArtIsOwn = g_ArtHash && (g_ArtOwner == trackKey || (!albumKey.empty() && albumKey == g_ArtOwnerAlbum));
+    g_ArtSettled = g_ArtIsOwn || now - g_ArtTrackSince >= 3000;
+
+    // While the new track's picture may still be coming, the widget is left as it is
+    lock_guard<mutex> guard(g_MediaState.lock);
+    if (g_ArtIsOwn) {
+        g_MediaState.albumArt = g_ArtBitmap;
+        g_MediaState.primaryColor = g_ArtTint;
+    } else if (g_ArtSettled) {
+        g_MediaState.albumArt.reset();
+        g_MediaState.primaryColor = Color(0, 0, 0);
     }
 }
 
+// Nothing is playing. The picture is hidden, but which track it belongs to is
+// kept, in case the player comes back still reporting it for something else.
 static void ClearAlbumArt() {
-    g_ArtHash = 0;
     g_ArtTrackKey.clear();
+    g_ArtIsOwn = false;
     g_ArtSettled = true;
     lock_guard<mutex> guard(g_MediaState.lock);
     g_MediaState.albumArt.reset();
@@ -1170,18 +1194,11 @@ static void ClearAlbumArt() {
 // Called before Discord::Push so a new title never goes out with the old picture.
 static void SyncDiscordCover() {
     bool wanted = Discord::g_enabled.load() && Discord::g_showCover.load();
-    uint64_t hash = wanted ? g_ArtHash : 0;
+    uint64_t hash = wanted && g_ArtIsOwn ? g_ArtHash : 0;
     if (hash != g_CoverHashSent) {
         g_CoverHashSent = hash;
         vector<uint8_t> jpeg;
-        if (hash) {
-            shared_ptr<Bitmap> art;
-            {
-                lock_guard<mutex> guard(g_MediaState.lock);
-                art = g_MediaState.albumArt;
-            }
-            jpeg = EncodeCoverJpeg(art.get());
-        }
+        if (hash) jpeg = EncodeCoverJpeg(g_ArtBitmap.get());
         Discord::SetCover(jpeg.empty() ? 0 : hash, std::move(jpeg));
     }
     Discord::SetCoverPending(wanted && !g_ArtSettled);
@@ -1218,6 +1235,7 @@ void UpdateMediaInfo() {
 
             wstring newTitle = props.Title().c_str();
             wstring newArtist = props.Artist().c_str();
+            wstring album = props.AlbumTitle().c_str();
 
             wstring source = SessionSourceLower(session);
             PlayerInfo pinfo = IdentifyPlayer(source);
@@ -1249,7 +1267,8 @@ void UpdateMediaInfo() {
             bool isPlaying =
                 (info.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
 
-            RefreshAlbumArt(props, source + L'\x1f' + newTitle + L'\x1f' + newArtist);
+            RefreshAlbumArt(props, source + L'\x1f' + newTitle + L'\x1f' + newArtist,
+                            album.empty() ? wstring() : source + L'\x1f' + album);
             SyncDiscordCover();
 
             {
@@ -1945,6 +1964,7 @@ void MediaThread() {
         // Bitmaps have to be gone before GDI+ shuts down
         lock_guard<mutex> guard(g_MediaState.lock);
         g_MediaState.albumArt.reset();
+        g_ArtBitmap.reset();
     }
     GdiplusShutdown(gdiplusToken);
     winrt::uninit_apartment();

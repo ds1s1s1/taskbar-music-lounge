@@ -30,7 +30,7 @@
 
 - **Discord status**: shows the song you're listening to on your Discord profile, no extra app needed
 - **Song and video pictures on Discord**: the cover of whatever is playing, YouTube thumbnails included, shows up next to your status
-- **The right picture every time**: the art changes as soon as the player's does instead of sticking to the previous song, and video thumbnails are cropped to a square instead of squashed
+- **The right picture every time**: the art changes as soon as the player's does instead of sticking to the previous song, video thumbnails are cropped to a square instead of squashed, and on sites that don't provide a picture you don't get the previous video's picture instead
 - **Progress bar** for the current track
 - **Colors that match the player**: Spotify green, MusicBee amber, Apple Music red and so on
 - **Preferred player** setting for when more than one app is playing
