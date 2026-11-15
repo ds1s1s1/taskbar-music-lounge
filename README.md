@@ -29,9 +29,12 @@
 ## What's new in this version
 
 - **Discord status**: shows the song you're listening to on your Discord profile, no extra app needed
+- **Song and video pictures on Discord**: the cover of whatever is playing, YouTube thumbnails included, shows up next to your status
+- **The right picture every time**: the art changes as soon as the player's does instead of sticking to the previous song, and video thumbnails are cropped to a square instead of squashed
 - **Progress bar** for the current track
 - **Colors that match the player**: Spotify green, MusicBee amber, Apple Music red and so on
 - **Preferred player** setting for when more than one app is playing
+- **Firefox shows up by name**: Firefox and browsers built on it, like Zen, used to appear as just "Media"
 - Every setting has a proper name and description in Windhawk
 
 ## Already in the version this is based on
@@ -95,12 +98,18 @@ The mod can show the song you're listening to on your Discord profile. It talks 
 1. Create an application at [discord.com/developers/applications](https://discord.com/developers/applications). Its name is what Discord shows after "Listening to", so something like **Music** works well.
 2. Copy the **Application ID** from the General Information page.
 3. In the mod settings, turn on **Enable Discord presence** and paste the ID into **Discord Client ID**.
-4. Optional: upload an image under **Rich Presence > Art Assets** and put its name in **Discord large image key**.
+4. Optional: upload an image under **Rich Presence > Art Assets** and put its name in **Discord large image key**. It's shown when there's no song picture.
 
 The status clears when you pause, unless **Keep Discord status while paused** is on. **Discord activity label** switches between "Listening to" and "Playing".
 
+### Song and video pictures
+
+Discord only shows pictures from a link, but Windows gives the mod the picture itself. So with **Show the song or video picture on Discord** on (the default), the mod uploads the current cover to [uguu.se](https://uguu.se), a free host that deletes files after 3 hours, and puts that link in your status. Each picture is uploaded once and reused while it's still online, and nothing is uploaded while Discord status is off.
+
+When the song changes, the new title and its picture show up on Discord together. Players often send the title a moment before the picture, so the mod waits a few seconds for it rather than showing the new song with the old cover.
+
 > [!NOTE]
-> Album art isn't sent to Discord. Windows only gives the mod the image itself, and Discord needs a URL.
+> Like any picture in a Discord status, the uploaded covers can be opened by anyone who has the link. If you'd rather not upload them, turn the setting off and Discord shows your **Discord large image key** instead.
 
 ## Troubleshooting
 
@@ -122,20 +131,28 @@ When more than one thing is playing, the widget follows whatever Windows conside
 Make sure the Discord desktop app is running, the Client ID is correct, and <b>Share your detected activities with others</b> is on under Activity Privacy in Discord's settings.
 </details>
 
+<details>
+<summary><b>Discord shows the app image instead of the song picture</b></summary>
+<br>
+Either the player didn't provide a picture for that track, or the upload to uguu.se failed. The mod tries again a minute later, and the reason is written to the mod's log in Windhawk. If uguu.se is blocked on your network, turn off <b>Show the song or video picture on Discord</b>.
+</details>
+
 ## How it works
 
 ```mermaid
 flowchart LR
     P["Spotify, MusicBee,<br/>browser, ..."] -- "Windows media<br/>controls (SMTC)" --> W["Taskbar widget"]
     W -- "discord-ipc pipe" --> D["Discord status"]
+    W -- "cover picture" --> U["uguu.se<br/>(deleted after 3 h)"]
+    U -. "link" .-> D
 ```
 
-The mod runs in its own small helper process next to `explorer.exe`. It reads the current media session from SMTC, draws the widget with GDI+ in a window that sits on the taskbar, and if Discord status is on, sends the song to the Discord app over its local IPC pipe.
+The mod runs in its own small helper process next to `explorer.exe`. It reads the current media session from SMTC, draws the widget with GDI+ in a window that sits on the taskbar, and if Discord status is on, sends the song to the Discord app over its local IPC pipe, along with a link to the uploaded cover.
 
 ## Credits
 
 - [Hashah2311](https://github.com/Hashah2311) made the original [Taskbar Music Lounge](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/taskbar-music-lounge.wh.cpp), which this is based on.
-- Discord status, the progress bar, per-player colors and the preferred player setting were added by [ds1s1s1](https://github.com/ds1s1s1).
+- Discord status with cover pictures, the progress bar, per-player colors and the preferred player setting were added by [ds1s1s1](https://github.com/ds1s1s1).
 
 ## License
 

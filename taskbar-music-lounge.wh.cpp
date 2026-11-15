@@ -1,12 +1,12 @@
 // ==WindhawkMod==
 // @id              taskbar-music-lounge
 // @name            Taskbar Music Lounge
-// @description     Now-playing widget for the taskbar with media controls, a progress bar and Discord Rich Presence
-// @version         0.2
+// @description     Now-playing widget for the taskbar with media controls, a progress bar and Discord Rich Presence with cover art
+// @version         0.3
 // @author          Hashah2311, ds1s1s1
 // @github          https://github.com/ds1s1s1
 // @include         explorer.exe
-// @compilerOptions -lole32 -ldwmapi -lgdi32 -luser32 -lwindowsapp -lshcore -lgdiplus -lshell32 -lcomdlg32
+// @compilerOptions -lole32 -ldwmapi -lgdi32 -luser32 -lwindowsapp -lshcore -lgdiplus -lshell32 -lcomdlg32 -lwinhttp -ladvapi32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -22,6 +22,8 @@ Apple Music, and media playing in Chrome, Edge or Firefox.
 
 ## Features
 - Album art, title and artist, with previous / play-pause / next buttons
+- The picture changes as soon as the player's does, and video thumbnails are
+  cropped to a square instead of squashed
 - Long titles scroll instead of getting cut off
 - Progress bar for the current track
 - Accent color based on the player (Spotify, MusicBee, Apple Music, ...)
@@ -36,11 +38,13 @@ The mod can also show the current song on your Discord profile.
    Its name is what shows up after "Listening to".
 2. Copy the Application ID from the General Information page.
 3. Optional: upload an image under Rich Presence > Art Assets and put its name
-   in "Discord large image key".
+   in "Discord large image key". It's shown when there's no song picture.
 4. Turn on "Enable Discord presence" and paste the ID into "Discord Client ID".
 
-Discord has to be running on the same PC. Album art isn't sent, since SMTC
-doesn't give a URL that Discord can load.
+Discord has to be running on the same PC. Discord only shows pictures from a
+link, so with "Show the song or video picture on Discord" on, the cover of what
+you're playing is uploaded to uguu.se (a temporary host that deletes files
+after 3 hours) and that link is sent to Discord.
 
 If MusicBee doesn't show up, enable its Windows media controls integration in
 MusicBee's preferences.
@@ -97,9 +101,12 @@ MusicBee's preferences.
   $options:
   - listening: Listening to
   - playing: Playing
+- DiscordShowCover: true
+  $name: Show the song or video picture on Discord
+  $description: Discord can only show pictures from a link, so the current cover is uploaded to uguu.se, a free temporary host that deletes files after 3 hours. Nothing is uploaded while Discord presence is off.
 - DiscordLargeImage: ""
   $name: Discord large image key
-  $description: Optional. The name of an uploaded Rich Presence art asset to show next to the track.
+  $description: Optional. Name of an art asset in your Discord app, shown when there is no picture to share.
 - DiscordShowWhenPaused: false
   $name: Keep Discord status while paused
   $description: If off, your Discord status is cleared when playback is paused or stopped.
@@ -119,7 +126,10 @@ MusicBee's preferences.
 #include <mutex>
 #include <cstdio>
 #include <cstdint>
+#include <map>
+#include <memory>
 #include <timeapi.h>
+#include <winhttp.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -235,7 +245,7 @@ struct MediaState {
     wstring player = L"";
     bool isPlaying = false;
     bool hasMedia = false;
-    Bitmap* albumArt = nullptr;
+    shared_ptr<Bitmap> albumArt;
     Color primaryColor = Color(0, 0, 0);
     Color accentColor = Color(kDefaultAccent);
     double progress = 0.0;
@@ -282,6 +292,38 @@ static wstring SessionSourceLower(GlobalSystemMediaTransportControlsSession cons
     }
 }
 
+// Firefox and browsers built on it report a hash of their install folder
+// instead of a name, and list that hash under TaskBarIDs. Returns the folder
+// name ("Mozilla Firefox", "Zen Browser", ...) or "" for anything else.
+static wstring GeckoBrowserFolder(wstring const& srcLower) {
+    static wstring lastSrc, lastFolder;
+    if (srcLower.size() != 16 || srcLower.find_first_not_of(L"0123456789abcdef") != wstring::npos) return L"";
+    if (srcLower == lastSrc) return lastFolder;
+    lastSrc = srcLower;
+    lastFolder.clear();
+
+    for (HKEY root : { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE }) {
+        HKEY key;
+        if (RegOpenKeyExW(root, L"Software\\Mozilla\\Firefox\\TaskBarIDs", 0, KEY_READ, &key) != ERROR_SUCCESS) continue;
+        for (DWORD i = 0; lastFolder.empty(); i++) {
+            wchar_t path[MAX_PATH], id[32];
+            DWORD pathLen = MAX_PATH, idSize = sizeof(id) - sizeof(wchar_t), type = 0;
+            LONG r = RegEnumValueW(key, i, path, &pathLen, nullptr, &type, reinterpret_cast<BYTE*>(id), &idSize);
+            if (r == ERROR_NO_MORE_ITEMS) break;
+            if (r != ERROR_SUCCESS || type != REG_SZ) continue;
+            id[idSize / sizeof(wchar_t)] = L'\0';
+            if (ToLower(id) == srcLower) {
+                wstring folder = path;
+                size_t slash = folder.find_last_of(L"\\/");
+                lastFolder = slash == wstring::npos ? folder : folder.substr(slash + 1);
+            }
+        }
+        RegCloseKey(key);
+        if (!lastFolder.empty()) break;
+    }
+    return lastFolder;
+}
+
 static PlayerInfo IdentifyPlayer(wstring const& srcLower) {
     auto has = [&](const wchar_t* needle) { return srcLower.find(needle) != wstring::npos; };
 
@@ -298,6 +340,10 @@ static PlayerInfo IdentifyPlayer(wstring const& srcLower) {
     if (has(L"firefox") || has(L"mozilla"))        return { L"Firefox",      0xFFFF6611 };
     if (has(L"zune") || has(L"media.player"))      return { L"Media Player", 0xFF5B8DEF };
 
+    wstring gecko = GeckoBrowserFolder(srcLower);
+    if (ToLower(gecko).find(L"firefox") != wstring::npos) return { L"Firefox", 0xFFFF6611 };
+    if (!gecko.empty())                                    return { gecko,      0xFFFF6611 };
+
     return { L"Media", kDefaultAccent };
 }
 
@@ -309,6 +355,7 @@ namespace Discord {
 
 std::atomic<bool> g_enabled{ false };
 std::atomic<bool> g_showWhenPaused{ false };
+std::atomic<bool> g_showCover{ true };
 std::atomic<bool> g_settingsDirty{ false };
 std::atomic<int>  g_activityType{ 2 };  // 0 = Playing, 2 = Listening
 std::mutex        g_cfgMutex;
@@ -325,8 +372,21 @@ struct Desired {
     bool isPlaying = false;
     std::wstring title, artist, player;
     long long startMs = 0, endMs = 0;
-    uint64_t version = 0;  // bumps only on meaningful change
+    uint64_t version = 0;            // bumps only on meaningful change
+    uint64_t coverHash = 0;          // picture of the current track, 0 = none
+    std::vector<uint8_t> coverJpeg;  // that picture as a square JPEG
+    bool coverPending = false;       // the track just changed and its picture may not be in yet
 } g_desired;
+
+// Covers already uploaded, by picture hash. Only the Discord thread uses this.
+struct UploadedCover {
+    std::string url;
+    ULONGLONG uploadedAt = 0;
+};
+std::map<uint64_t, UploadedCover> g_covers;
+
+// uguu.se deletes files after 3 hours, so links are reused for a bit less than that
+constexpr ULONGLONG kCoverLifetimeMs = 150ULL * 60 * 1000;
 
 static std::string WideToUtf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -386,8 +446,9 @@ static bool WriteFrame(HANDLE pipe, int op, const std::string& payload) {
            written == buf.size();
 }
 
-// Consume anything Discord sent back. Returns false if the pipe is broken.
-static bool DrainReads(HANDLE pipe) {
+// Consume anything Discord sent back (appended to replies when given).
+// Returns false if the pipe is broken.
+static bool DrainReads(HANDLE pipe, std::string* replies = nullptr) {
     DWORD avail = 0;
     while (true) {
         if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) return false;
@@ -396,6 +457,7 @@ static bool DrainReads(HANDLE pipe) {
         DWORD toRead = avail < sizeof(tmp) ? avail : (DWORD)sizeof(tmp);
         DWORD rd = 0;
         if (!ReadFile(pipe, tmp, toRead, &rd, nullptr) || rd == 0) return false;
+        if (replies) replies->append(tmp, rd);
     }
 }
 
@@ -464,6 +526,87 @@ static bool SendActivity(HANDLE pipe, const std::string& activityJson) {
     return WriteFrame(pipe, 1 /*FRAME*/, payload);
 }
 
+// uguu.se answers {"success":true,"files":[{"url":"https:\/\/d.uguu.se\/abc.jpg",...}]}
+static std::string ParseUploadUrl(const std::string& json) {
+    size_t key = json.find("\"url\"");
+    size_t colon = key == std::string::npos ? key : json.find(':', key);
+    size_t start = colon == std::string::npos ? colon : json.find('"', colon);
+    size_t end = start == std::string::npos ? start : json.find('"', start + 1);
+    if (end == std::string::npos) return {};
+    std::string url;
+    for (size_t i = start + 1; i < end; i++) {
+        if (json[i] == '\\' && i + 1 < end) i++;  // "\/" -> "/"
+        url += json[i];
+    }
+    return url.rfind("https://", 0) == 0 && url.size() <= 250 ? url : std::string();
+}
+
+// Discord only shows pictures from a link, so the cover goes to uguu.se, a
+// free host that deletes files after 3 hours. Returns the link, or "" on failure.
+static std::string UploadCover(const std::vector<uint8_t>& jpeg) {
+    std::string url;
+    HINTERNET session = nullptr;
+#ifdef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+    session = WinHttpOpen(L"TaskbarMusicLounge", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+#endif
+    if (!session) {
+        session = WinHttpOpen(L"TaskbarMusicLounge", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
+    if (!session) return url;
+    WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
+
+    HINTERNET connect = WinHttpConnect(session, L"uguu.se", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET request = connect ? WinHttpOpenRequest(connect, L"POST", L"/upload", nullptr, WINHTTP_NO_REFERER,
+                                                     WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                                : nullptr;
+    if (request) {
+        char boundary[64];
+        sprintf_s(boundary, "----TaskbarMusicLounge%08lx", (unsigned long)GetTickCount());
+        std::string body = std::string("--") + boundary + "\r\n"
+            "Content-Disposition: form-data; name=\"files[]\"; filename=\"cover.jpg\"\r\n"
+            "Content-Type: image/jpeg\r\n\r\n";
+        body.append(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
+        body += std::string("\r\n--") + boundary + "--\r\n";
+
+        wchar_t headers[128];
+        swprintf_s(headers, L"Content-Type: multipart/form-data; boundary=%hs", boundary);
+
+        if (WinHttpSendRequest(request, headers, (DWORD)-1L, &body[0], (DWORD)body.size(),
+                               (DWORD)body.size(), 0) &&
+            WinHttpReceiveResponse(request, nullptr)) {
+            DWORD status = 0, size = sizeof(status);
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX);
+            std::string reply;
+            DWORD avail = 0;
+            while (WinHttpQueryDataAvailable(request, &avail) && avail > 0 && reply.size() < 65536) {
+                size_t old = reply.size();
+                reply.resize(old + avail);
+                DWORD read = 0;
+                if (!WinHttpReadData(request, &reply[old], avail, &read)) break;
+                reply.resize(old + read);
+            }
+            if (status == 200) url = ParseUploadUrl(reply);
+            if (url.empty()) Wh_Log(L"Discord: cover upload failed (HTTP %lu)", status);
+        } else {
+            Wh_Log(L"Discord: cover upload failed (error %lu)", GetLastError());
+        }
+        WinHttpCloseHandle(request);
+    }
+    if (connect) WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    return url;
+}
+
+static void ForgetOldCovers(ULONGLONG now) {
+    for (auto it = g_covers.begin(); it != g_covers.end();) {
+        if (now - it->second.uploadedAt >= kCoverLifetimeMs) it = g_covers.erase(it);
+        else ++it;
+    }
+}
+
 static void ClosePipe() {
     if (g_pipe != INVALID_HANDLE_VALUE) {
         CloseHandle(g_pipe);
@@ -473,8 +616,12 @@ static void ClosePipe() {
 
 void Thread() {
     uint64_t lastSentVersion = UINT64_MAX;
+    std::string lastSentImage;
     bool lastWasCleared = false;
     DWORD lastConnectAttempt = 0;
+    bool linksRejected = false;   // this Discord refused a picture link; stop sending them
+    ULONGLONG retryUploadAt = 0;  // after a failed upload, the next one waits a minute
+    ULONGLONG holdingSince = 0;   // when an update started waiting for its picture
 
     while (g_Running) {
         if (!g_enabled.load()) {
@@ -487,7 +634,9 @@ void Thread() {
         if (g_settingsDirty.exchange(false)) {
             ClosePipe();
             lastSentVersion = UINT64_MAX;
+            lastSentImage.clear();
             lastWasCleared = false;
+            linksRejected = false;
         }
 
         std::string clientId, largeImg;
@@ -498,6 +647,7 @@ void Thread() {
         }
         int type = g_activityType.load();
         bool showPaused = g_showWhenPaused.load();
+        bool showCover = g_showCover.load() && !linksRejected;
 
         if (g_pipe == INVALID_HANDLE_VALUE) {
             DWORD now = GetTickCount();
@@ -506,7 +656,9 @@ void Thread() {
             g_pipe = TryConnect(clientId);
             if (g_pipe == INVALID_HANDLE_VALUE) { Sleep(500); continue; }
             lastSentVersion = UINT64_MAX;
+            lastSentImage.clear();
             lastWasCleared = false;
+            linksRejected = false;  // Discord may have been updated in the meantime
         }
 
         // Snapshot desired presence.
@@ -521,27 +673,74 @@ void Thread() {
             snap.startMs = g_desired.startMs;
             snap.endMs = g_desired.endMs;
             snap.version = g_desired.version;
+            snap.coverHash = g_desired.coverHash;
+            snap.coverPending = g_desired.coverPending;
         }
 
         bool shouldShow = snap.hasMedia && (snap.isPlaying || showPaused);
-        bool ok = true;
 
-        if (shouldShow) {
-            if (snap.version != lastSentVersion) {
-                ok = SendActivity(g_pipe, BuildActivity(snap, largeImg, type));
-                if (ok) { lastSentVersion = snap.version; lastWasCleared = false; }
-            }
-        } else {
-            if (!lastWasCleared) {
-                ok = SendActivity(g_pipe, "null");
-                if (ok) { lastWasCleared = true; lastSentVersion = UINT64_MAX; }
+        // Large image: the track's own picture once it has a link, otherwise
+        // the asset key from the settings.
+        std::string image = largeImg;
+        bool waitForCover = false;
+        if (shouldShow && showCover) {
+            ULONGLONG now = GetTickCount64();
+            ForgetOldCovers(now);
+            auto it = g_covers.find(snap.coverHash);
+            if (snap.coverPending) {
+                waitForCover = true;
+            } else if (it != g_covers.end()) {
+                image = it->second.url;
+            } else if (snap.coverHash && now >= retryUploadAt) {
+                std::vector<uint8_t> jpeg;
+                {
+                    std::lock_guard<std::mutex> g(g_desired.m);
+                    if (g_desired.coverHash == snap.coverHash) jpeg = g_desired.coverJpeg;
+                }
+                std::string url = jpeg.empty() ? std::string() : UploadCover(jpeg);
+                if (!url.empty()) {
+                    g_covers[snap.coverHash] = { url, now };
+                    image = url;
+                } else if (!jpeg.empty()) {
+                    retryUploadAt = GetTickCount64() + 60000;
+                }
             }
         }
 
-        if (!ok || !DrainReads(g_pipe)) {
+        bool ok = true;
+        if (shouldShow) {
+            bool changed = snap.version != lastSentVersion || image != lastSentImage;
+            // A new track's title shows up a moment before its picture. Hold the
+            // update for a few seconds so both change on Discord together.
+            ULONGLONG now = GetTickCount64();
+            if (!changed || !waitForCover) holdingSince = 0;
+            else if (!holdingSince) holdingSince = now;
+            bool hold = holdingSince && now - holdingSince < 5000;
+
+            if (changed && !hold) {
+                ok = SendActivity(g_pipe, BuildActivity(snap, image, type));
+                if (ok) { lastSentVersion = snap.version; lastSentImage = image; lastWasCleared = false; }
+            }
+        } else {
+            holdingSince = 0;
+            if (!lastWasCleared) {
+                ok = SendActivity(g_pipe, "null");
+                if (ok) { lastWasCleared = true; lastSentVersion = UINT64_MAX; lastSentImage.clear(); }
+            }
+        }
+
+        std::string replies;
+        if (!ok || !DrainReads(g_pipe, &replies)) {
             ClosePipe();
             lastSentVersion = UINT64_MAX;
+            lastSentImage.clear();
             lastWasCleared = false;
+        } else if (replies.find("\"evt\":\"ERROR\"") != std::string::npos &&
+                   lastSentImage.rfind("https://", 0) == 0) {
+            // Older Discord builds only take asset keys. Keep the status, drop the picture.
+            Wh_Log(L"Discord: picture link rejected, continuing without it");
+            linksRejected = true;
+            lastSentVersion = UINT64_MAX;
         }
 
         Sleep(1000);
@@ -572,6 +771,19 @@ void Push(bool hasMedia, bool isPlaying, const std::wstring& title,
     g_desired.startMs = startMs;
     g_desired.endMs = endMs;
     if (changed) g_desired.version++;
+}
+
+// Hand the current track's picture to the Discord thread (hash 0 = none).
+void SetCover(uint64_t hash, std::vector<uint8_t> jpeg) {
+    std::lock_guard<std::mutex> g(g_desired.m);
+    g_desired.coverHash = hash;
+    g_desired.coverJpeg = std::move(jpeg);
+}
+
+// True right after a track change, until that track's own picture is in.
+void SetCoverPending(bool pending) {
+    std::lock_guard<std::mutex> g(g_desired.m);
+    g_desired.coverPending = pending;
 }
 
 }  // namespace Discord
@@ -626,19 +838,166 @@ GlobalSystemMediaTransportControlsSession SelectPreferredSession() {
     return nullptr;
 }
 
-Bitmap* StreamToBitmap(IRandomAccessStreamWithContentType const& stream) {
-    if (!stream) return nullptr;
+// ---------------------------------------------------------------------------
+// Album art
+// ---------------------------------------------------------------------------
 
-    IStream* nativeStream = nullptr;
-    if (SUCCEEDED(CreateStreamOverRandomAccessStream(reinterpret_cast<IUnknown*>(winrt::get_abi(stream)), IID_PPV_ARGS(&nativeStream)))) {
-        Bitmap* bmp = Bitmap::FromStream(nativeStream);
-        nativeStream->Release();
+static const GUID kEncoderQuality = { 0x1d5be4b5, 0xfa4a, 0x452d, { 0x9c, 0xdd, 0x5d, 0xb3, 0x51, 0x05, 0xe7, 0xeb } };
 
-        if (bmp && bmp->GetLastStatus() == Ok) return bmp;
-        delete bmp;
+// Raw bytes of the session's thumbnail (usually a JPEG or PNG).
+static bool ReadThumbnail(GlobalSystemMediaTransportControlsSessionMediaProperties const& props, vector<uint8_t>& out) {
+    out.clear();
+    try {
+        auto ref = props.Thumbnail();
+        if (!ref) return false;
+        auto stream = ref.OpenReadAsync().get();
+        if (!stream) return false;
+        uint64_t size = stream.Size();
+        if (size == 0 || size > 16 * 1024 * 1024) return false;
+        DataReader reader(stream);
+        uint32_t loaded = reader.LoadAsync(static_cast<uint32_t>(size)).get();
+        out.resize(loaded);
+        reader.ReadBytes(out);
+    } catch (...) {
+        out.clear();
+    }
+    return !out.empty();
+}
+
+static uint64_t HashBytes(const vector<uint8_t>& data) {
+    uint64_t h = 1469598103934665603ULL;  // FNV-1a
+    for (uint8_t b : data) {
+        h ^= b;
+        h *= 1099511628211ULL;
+    }
+    return h ? h : 1;  // 0 means "no picture"
+}
+
+// The part of a video thumbnail inside its black bars. Square pictures are
+// album covers and are left alone, and bars only count when both sides match,
+// so a dark cover or a dark sky doesn't get cropped.
+static Rect ContentRect(Bitmap* bmp) {
+    INT w = (INT)bmp->GetWidth(), h = (INT)bmp->GetHeight();
+    Rect full(0, 0, w, h);
+    if (abs(w - h) * 20 <= max(w, h)) return full;
+    BitmapData data;
+    if (bmp->LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &data) != Ok) return full;
+
+    auto dark = [&](INT x, INT y) {
+        const BYTE* p = static_cast<const BYTE*>(data.Scan0) + y * data.Stride + x * 4;
+        return p[0] < 24 && p[1] < 24 && p[2] < 24;
+    };
+    auto rowDark = [&](INT y) {
+        for (INT x = 0; x < w; x += 4) if (!dark(x, y)) return false;
+        return true;
+    };
+    auto colDark = [&](INT x) {
+        for (INT y = 0; y < h; y += 4) if (!dark(x, y)) return false;
+        return true;
+    };
+
+    INT top = 0, bottom = 0, left = 0, right = 0;
+    while (top < h / 3 && rowDark(top)) top++;
+    while (bottom < h / 3 && rowDark(h - 1 - bottom)) bottom++;
+    while (left < w / 3 && colDark(left)) left++;
+    while (right < w / 3 && colDark(w - 1 - right)) right++;
+    bmp->UnlockBits(&data);
+
+    // Allow a couple of pixels of difference for blurry JPEG edges
+    if (abs(top - bottom) > 2 + h / 50) top = bottom = 0;
+    if (abs(left - right) > 2 + w / 50) left = right = 0;
+    return Rect(left, top, w - left - right, h - top - bottom);
+}
+
+// Decode a thumbnail into a standalone bitmap without black bars. GDI+ needs
+// the source stream for as long as a bitmap made from it lives, so the pixels
+// are copied out and the stream is released right away.
+static Bitmap* DecodeArt(const vector<uint8_t>& bytes) {
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+    if (!mem) return nullptr;
+    void* dst = GlobalLock(mem);
+    if (!dst) {
+        GlobalFree(mem);
+        return nullptr;
+    }
+    memcpy(dst, bytes.data(), bytes.size());
+    GlobalUnlock(mem);
+
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &stream))) {
+        GlobalFree(mem);
+        return nullptr;
     }
 
-    return nullptr;
+    Bitmap* result = nullptr;
+    Bitmap* decoded = Bitmap::FromStream(stream);
+    if (decoded && decoded->GetLastStatus() == Ok && decoded->GetWidth() > 0 && decoded->GetHeight() > 0) {
+        Rect content = ContentRect(decoded);
+        result = new Bitmap(content.Width, content.Height, PixelFormat32bppPARGB);
+        Graphics g(result);
+        g.DrawImage(decoded, Rect(0, 0, content.Width, content.Height),
+                    content.X, content.Y, content.Width, content.Height, UnitPixel);
+    }
+    delete decoded;
+    stream->Release();
+    return result;
+}
+
+static bool GetJpegEncoder(CLSID* clsid) {
+    UINT count = 0, size = 0;
+    if (GetImageEncodersSize(&count, &size) != Ok || size == 0) return false;
+    vector<BYTE> buffer(size);
+    auto* codecs = reinterpret_cast<ImageCodecInfo*>(buffer.data());
+    if (GetImageEncoders(count, size, codecs) != Ok) return false;
+    for (UINT i = 0; i < count; i++) {
+        if (wcscmp(codecs[i].MimeType, L"image/jpeg") == 0) {
+            *clsid = codecs[i].Clsid;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The middle square of the art as a JPEG. Big pictures are scaled down to
+// 512x512, the size Discord recommends; small ones aren't blown up past 256.
+static vector<uint8_t> EncodeCoverJpeg(Bitmap* art) {
+    vector<uint8_t> out;
+    CLSID jpegClsid;
+    if (!art || !GetJpegEncoder(&jpegClsid)) return out;
+    INT w = (INT)art->GetWidth(), h = (INT)art->GetHeight();
+    INT side = min(w, h);
+    if (side <= 0) return out;
+    INT size = side < 256 ? 256 : side > 512 ? 512 : side;
+
+    Bitmap square(size, size, PixelFormat24bppRGB);
+    {
+        Graphics g(&square);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.SetPixelOffsetMode(PixelOffsetModeHalf);
+        g.DrawImage(art, Rect(0, 0, size, size), (w - side) / 2, (h - side) / 2, side, side, UnitPixel);
+    }
+
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) return out;
+    ULONG quality = 90;
+    EncoderParameters params;
+    params.Count = 1;
+    params.Parameter[0].Guid = kEncoderQuality;
+    params.Parameter[0].Type = EncoderParameterValueTypeLong;
+    params.Parameter[0].NumberOfValues = 1;
+    params.Parameter[0].Value = &quality;
+    if (square.Save(stream, &jpegClsid, &params) == Ok) {
+        HGLOBAL mem = nullptr;
+        STATSTG stat;
+        if (SUCCEEDED(GetHGlobalFromStream(stream, &mem)) && SUCCEEDED(stream->Stat(&stat, STATFLAG_NONAME))) {
+            if (const BYTE* p = static_cast<const BYTE*>(GlobalLock(mem))) {
+                out.assign(p, p + stat.cbSize.QuadPart);
+                GlobalUnlock(mem);
+            }
+        }
+    }
+    stream->Release();
+    return out;
 }
 
 Color CalculateAverageColor(Bitmap* bmp) {
@@ -721,6 +1080,7 @@ void LoadSettings() {
     // ----- Discord settings -----
     Discord::g_enabled.store(Wh_GetIntSetting(L"DiscordEnabled") != 0);
     Discord::g_showWhenPaused.store(Wh_GetIntSetting(L"DiscordShowWhenPaused") != 0);
+    Discord::g_showCover.store(Wh_GetIntSetting(L"DiscordShowCover") != 0);
 
     {
         std::lock_guard<std::mutex> g(Discord::g_cfgMutex);
@@ -754,6 +1114,94 @@ static long long NowUnixMs() {
     return (long long)((u.QuadPart - 116444736000000000ULL) / 10000ULL);
 }
 
+// Album art state, only used on the media window's thread
+uint64_t g_ArtHash = 0;          // hash of the thumbnail on screen, 0 = none
+wstring g_ArtTrackKey;           // player + title + artist it belongs to
+ULONGLONG g_ArtTrackSince = 0;   // when that track showed up
+uint64_t g_ArtHashBefore = 0;    // picture on screen at that moment
+bool g_ArtSettled = true;        // false while the track's own picture may still be coming
+ULONGLONG g_ArtNextCheck = 0;
+uint64_t g_CoverHashSent = 0;    // picture last handed to the Discord thread
+
+// Players often publish the title first and the picture a moment later, and
+// some keep the previous track's picture for a while. So the thumbnail is
+// checked on every poll for a few seconds after a track change, and every few
+// seconds after that, and swapped whenever its bytes change.
+static void RefreshAlbumArt(GlobalSystemMediaTransportControlsSessionMediaProperties const& props,
+                            const wstring& trackKey) {
+    ULONGLONG now = GetTickCount64();
+    if (trackKey != g_ArtTrackKey) {
+        g_ArtTrackKey = trackKey;
+        g_ArtTrackSince = now;
+        g_ArtHashBefore = g_ArtHash;
+        g_ArtSettled = false;
+    }
+
+    if (now - g_ArtTrackSince < 8000 || now >= g_ArtNextCheck) {
+        g_ArtNextCheck = now + 4000;
+        vector<uint8_t> bytes;
+        uint64_t hash = ReadThumbnail(props, bytes) ? HashBytes(bytes) : 0;
+        if (hash != g_ArtHash) {
+            g_ArtHash = hash;
+            shared_ptr<Bitmap> art(hash ? DecodeArt(bytes) : nullptr);
+            Color tint = art ? CalculateAverageColor(art.get()) : Color(0, 0, 0);
+            lock_guard<mutex> guard(g_MediaState.lock);
+            g_MediaState.albumArt = art;
+            g_MediaState.primaryColor = tint;
+        }
+    }
+
+    // The new track's picture is in once it differs from the old one. If it
+    // hasn't changed after a few seconds, both tracks share it (same album).
+    if (!g_ArtSettled) {
+        g_ArtSettled = (g_ArtHash && g_ArtHash != g_ArtHashBefore) || now - g_ArtTrackSince >= 3000;
+    }
+}
+
+static void ClearAlbumArt() {
+    g_ArtHash = 0;
+    g_ArtTrackKey.clear();
+    g_ArtSettled = true;
+    lock_guard<mutex> guard(g_MediaState.lock);
+    g_MediaState.albumArt.reset();
+}
+
+// Give the Discord thread the current picture while sharing it is turned on.
+// Called before Discord::Push so a new title never goes out with the old picture.
+static void SyncDiscordCover() {
+    bool wanted = Discord::g_enabled.load() && Discord::g_showCover.load();
+    uint64_t hash = wanted ? g_ArtHash : 0;
+    if (hash != g_CoverHashSent) {
+        g_CoverHashSent = hash;
+        vector<uint8_t> jpeg;
+        if (hash) {
+            shared_ptr<Bitmap> art;
+            {
+                lock_guard<mutex> guard(g_MediaState.lock);
+                art = g_MediaState.albumArt;
+            }
+            jpeg = EncodeCoverJpeg(art.get());
+        }
+        Discord::SetCover(jpeg.empty() ? 0 : hash, std::move(jpeg));
+    }
+    Discord::SetCoverPending(wanted && !g_ArtSettled);
+}
+
+static void ShowNoMedia() {
+    ClearAlbumArt();
+    SyncDiscordCover();
+    {
+        lock_guard<mutex> guard(g_MediaState.lock);
+        g_MediaState.hasMedia = false;
+        g_MediaState.title = L"No Media";
+        g_MediaState.artist = L"";
+        g_MediaState.player = L"";
+        g_MediaState.isPlaying = false;
+        g_MediaState.hasProgress = false;
+    }
+    Discord::Push(false, false, L"", L"", L"", 0, 0);
+}
+
 void UpdateMediaInfo() {
     try {
         if (!g_SessionManager) {
@@ -771,7 +1219,8 @@ void UpdateMediaInfo() {
             wstring newTitle = props.Title().c_str();
             wstring newArtist = props.Artist().c_str();
 
-            PlayerInfo pinfo = IdentifyPlayer(SessionSourceLower(session));
+            wstring source = SessionSourceLower(session);
+            PlayerInfo pinfo = IdentifyPlayer(source);
 
             // Timeline / progress.
             double progress = 0.0;
@@ -800,30 +1249,11 @@ void UpdateMediaInfo() {
             bool isPlaying =
                 (info.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
 
+            RefreshAlbumArt(props, source + L'\x1f' + newTitle + L'\x1f' + newArtist);
+            SyncDiscordCover();
+
             {
                 lock_guard<mutex> guard(g_MediaState.lock);
-
-                bool shouldReloadArt =
-                    !g_MediaState.albumArt ||
-                    g_MediaState.title != newTitle ||
-                    g_MediaState.artist != newArtist;
-
-                if (shouldReloadArt) {
-                    if (g_MediaState.albumArt) {
-                        delete g_MediaState.albumArt;
-                        g_MediaState.albumArt = nullptr;
-                    }
-
-                    auto thumbRef = props.Thumbnail();
-                    if (thumbRef) {
-                        auto stream = thumbRef.OpenReadAsync().get();
-                        g_MediaState.albumArt = StreamToBitmap(stream);
-                        if (g_MediaState.albumArt) {
-                            g_MediaState.primaryColor = CalculateAverageColor(g_MediaState.albumArt);
-                        }
-                    }
-                }
-
                 g_MediaState.title = newTitle.empty() ? pinfo.name : newTitle;
                 g_MediaState.artist = newArtist;
                 g_MediaState.player = pinfo.name;
@@ -838,36 +1268,10 @@ void UpdateMediaInfo() {
                           newTitle.empty() ? pinfo.name : newTitle,
                           newArtist, pinfo.name, startMs, endMs);
         } else {
-            lock_guard<mutex> guard(g_MediaState.lock);
-            g_MediaState.hasMedia = false;
-            g_MediaState.title = L"No Media";
-            g_MediaState.artist = L"";
-            g_MediaState.player = L"";
-            g_MediaState.isPlaying = false;
-            g_MediaState.hasProgress = false;
-
-            if (g_MediaState.albumArt) {
-                delete g_MediaState.albumArt;
-                g_MediaState.albumArt = nullptr;
-            }
-
-            Discord::Push(false, false, L"", L"", L"", 0, 0);
+            ShowNoMedia();
         }
     } catch (...) {
-        lock_guard<mutex> guard(g_MediaState.lock);
-        g_MediaState.hasMedia = false;
-        g_MediaState.title = L"No Media";
-        g_MediaState.artist = L"";
-        g_MediaState.player = L"";
-        g_MediaState.isPlaying = false;
-        g_MediaState.hasProgress = false;
-
-        if (g_MediaState.albumArt) {
-            delete g_MediaState.albumArt;
-            g_MediaState.albumArt = nullptr;
-        }
-
-        Discord::Push(false, false, L"", L"", L"", 0, 0);
+        ShowNoMedia();
     }
 }
 
@@ -960,7 +1364,7 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
         state.title = g_MediaState.title;
         state.artist = g_MediaState.artist;
         state.player = g_MediaState.player;
-        state.albumArt = g_MediaState.albumArt ? g_MediaState.albumArt->Clone() : nullptr;
+        state.albumArt = g_MediaState.albumArt;
         state.hasMedia = g_MediaState.hasMedia;
         state.isPlaying = g_MediaState.isPlaying;
         state.primaryColor = g_MediaState.primaryColor;
@@ -972,10 +1376,6 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
     Color accent = state.accentColor;
 
     if (!state.hasMedia) {
-        if (state.albumArt) {
-            delete state.albumArt;
-            state.albumArt = nullptr;
-        }
         return;
     }
 
@@ -997,16 +1397,17 @@ void DrawMediaPanel(HDC hdc, int width, int height) {
     AddRoundedRect(albumPath, artX, artY, artSize, artSize, kAlbumCornerRadius);
 
     if (state.albumArt) {
+        // Video thumbnails are wide: show the middle square, like a cover, instead of squashing them
+        INT iw = (INT)state.albumArt->GetWidth(), ih = (INT)state.albumArt->GetHeight();
+        INT side = min(iw, ih);
         GraphicsState clipState = graphics.Save();
         graphics.SetClip(&albumPath);
-        graphics.DrawImage(state.albumArt, artX, artY, artSize, artSize);
+        graphics.DrawImage(state.albumArt.get(), Rect(artX, artY, artSize, artSize),
+                           (iw - side) / 2, (ih - side) / 2, side, side, UnitPixel);
         graphics.Restore(clipState);
 
         Pen albumBorder(Color(48, 255, 255, 255), 1.0f);
         graphics.DrawPath(&albumBorder, &albumPath);
-
-        delete state.albumArt;
-        state.albumArt = nullptr;
     } else {
         SolidBrush placeBrush(Color(60, 128, 128, 128));
         graphics.FillPath(&placeBrush, &albumPath);
@@ -1540,6 +1941,11 @@ void MediaThread() {
     }
 
     UnregisterClass(wc.lpszClassName, wc.hInstance);
+    {
+        // Bitmaps have to be gone before GDI+ shuts down
+        lock_guard<mutex> guard(g_MediaState.lock);
+        g_MediaState.albumArt.reset();
+    }
     GdiplusShutdown(gdiplusToken);
     winrt::uninit_apartment();
 }
